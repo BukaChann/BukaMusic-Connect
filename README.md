@@ -6,7 +6,11 @@
 
 <p align="center">手机端主应用：<a href="https://github.com/HAN-BAK/BukaMusic">BukaMusic</a> · 桌面端：<a href="https://github.com/HAN-BAK/BukaMusic-Desktop">BukaMusic Desktop</a></p>
 
-<p align="center">下载：<a href="https://gitee.com/hanhan2048/BukaMusic-Releases/releases">Gitee Releases</a>（Android 6.0+）</p>
+<p align="center">手动下载：<a href="https://github.com/HAN-BAK/BukaMusic-Connect/releases">GitHub Releases</a> · <a href="https://gitee.com/hanhan2048/BukaMusic-Releases/releases">Gitee Releases</a></p>
+
+<p align="center">应用内更新：通过 Gitee 检测新版本并下载安装包</p>
+
+<p align="center">Android 6.0+</p>
 
 ## 功能
 

@@ -417,7 +417,7 @@
 ### 桌面控制台接口（新）
 
 - 新增一组局域网 HTTP 接口，供电脑端的
-  [BukaMusic 控制台](https://github.com/HAN-BAK/BukaMusicDesktop) 使用：
+  [BukaMusic 控制台](https://github.com/BukaChann/BukaMusic-Desktop) 使用：
   `GET /api/info`（设备信息）、`GET /api/state`（播放状态）、
   `GET/POST /api/settings`（读写设置）、`GET /api/library`（曲库）、
   `POST /api/control`（播放控制、切歌、进度、音量、播放方式、重新扫描、

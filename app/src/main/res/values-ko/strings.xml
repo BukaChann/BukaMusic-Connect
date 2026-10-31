@@ -112,7 +112,7 @@
     <string name="about_developer_value">WeiFanchuan</string>
     <string name="about_developer_github">GitHub: WeiFanchuan</string>
     <string name="about_project">프로젝트</string>
-    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic-Connect</string>
+    <string name="about_project_value">https://github.com/BukaChann/BukaMusic-Connect</string>
     <string name="about_open_source">오픈소스</string>
     <string name="about_open_source_hint">이 앱은 다음 오픈소스 구성 요소를 사용합니다:</string>
     <string name="os_airreceiver">AirReceiver / DroidAirPlay(GPL-3.0) · AirPlay 수신 엔진</string>

@@ -4,9 +4,9 @@
 
 <p align="center"><strong>布卡聚音</strong> · 互联终端设备端：本地音乐 / AirPlay 接收 / 多房间同步 / 歌词动画 / 屏保时钟</p>
 
-<p align="center">手机端主应用：<a href="https://github.com/HAN-BAK/BukaMusic">BukaMusic</a> · 桌面端：<a href="https://github.com/HAN-BAK/BukaMusic-Desktop">BukaMusic Desktop</a></p>
+<p align="center">手机端主应用：<a href="https://github.com/BukaChann/BukaMusic">BukaMusic</a> · 桌面端：<a href="https://github.com/BukaChann/BukaMusic-Desktop">BukaMusic Desktop</a></p>
 
-<p align="center">手动下载：<a href="https://github.com/HAN-BAK/BukaMusic-Connect/releases">GitHub Releases</a> · <a href="https://gitee.com/hanhan2048/BukaMusic-Releases/releases">Gitee Releases</a></p>
+<p align="center">手动下载：<a href="https://github.com/BukaChann/BukaMusic-Connect/releases">GitHub Releases</a> · <a href="https://gitee.com/hanhan2048/BukaMusic-Releases/releases">Gitee Releases</a></p>
 
 <p align="center">应用内更新：通过 Gitee 检测新版本并下载安装包</p>
 

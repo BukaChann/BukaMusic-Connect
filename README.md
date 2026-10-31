@@ -1,4 +1,4 @@
-<h1 align="center">BukaMusic Connect</h1>
+<h1 align="center">BukaMusic Connect（布卡聚音）</h1>
 
 <p align="center"><img src="docs/screenshots/icon.png" width="112" alt="BukaMusic Connect"></p>
 

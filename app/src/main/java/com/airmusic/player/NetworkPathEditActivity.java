@@ -99,7 +99,12 @@ public class NetworkPathEditActivity extends BaseActivity {
             if (editing.port > 0) portInput.setText(String.valueOf(editing.port));
             folderInput.setText(editing.path);
             userInput.setText(editing.user);
-            passwordInput.setText(editing.password);
+            // Never render a saved password back into the UI. Leaving the field
+            // empty keeps the existing Keystore-protected credential.
+            passwordInput.setText("");
+            if (editing.hasPassword()) {
+                passwordInput.setHint(R.string.net_path_password_saved);
+            }
             domainInput.setText(editing.domain);
             findViewById(R.id.btn_delete_net_path).setVisibility(View.VISIBLE);
             ((TextView) findViewById(R.id.txt_title)).setText(R.string.net_path_edit);
@@ -173,10 +178,14 @@ public class NetworkPathEditActivity extends BaseActivity {
         }
         String name = nameInput.getText().toString().trim();
         if (name.isEmpty()) name = host;
+        String password = passwordInput.getText().toString();
+        if (password.isEmpty() && editing != null && editing.hasPassword()) {
+            password = editing.password;
+        }
         return new NetSource(editing == null ? NetSource.newId() : editing.id, type, name,
                 host, port.value, folderInput.getText().toString().trim(),
                 userInput.getText().toString().trim(),
-                passwordInput.getText().toString(),
+                password,
                 domainInput.getText().toString().trim());
     }
 

@@ -12,10 +12,13 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.airmusic.player.library.MusicLibrary;
+import com.airmusic.player.library.MusicPath;
 import com.airmusic.player.library.Track;
 import com.airmusic.player.service.PlaybackService;
+import com.airmusic.player.util.PathSecurity;
 import com.airmusic.player.util.PlayerUiState;
 import com.airmusic.player.util.Prefs;
+import com.airmusic.player.util.StorageHelper;
 import com.airmusic.player.util.StateBus;
 
 import org.json.JSONArray;
@@ -437,10 +440,7 @@ public final class ControlApi {
             return;
         }
         File file = new File(requested);
-        String root = new Prefs(context).getMusicFolderPath();
-        if (!file.isFile()
-                || (root != null && !root.isEmpty()
-                    && !file.getAbsolutePath().startsWith(root))) {
+        if (!isLibraryFile(context, file)) {
             sendJson(out, 404, error("no such file"));
             return;
         }
@@ -480,7 +480,8 @@ public final class ControlApi {
                     .append('/').append(total).append("\r\n");
         }
         head.append("Connection: close\r\n");
-        head.append("Access-Control-Allow-Origin: *\r\n\r\n");
+        head.append("Cache-Control: no-store\r\n");
+        head.append("X-Content-Type-Options: nosniff\r\n\r\n");
         out.write(head.toString().getBytes(StandardCharsets.ISO_8859_1));
 
         try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "r")) {
@@ -583,7 +584,7 @@ public final class ControlApi {
             }
         }
         File file = new File(path);
-        if (!file.isFile()) return null;
+        if (!isLibraryFile(context, file)) return null;
         String name = file.getName();
         int dot = name.lastIndexOf('.');
         return new Track(Uri.fromFile(file), null, null, null, 0L,
@@ -838,9 +839,11 @@ public final class ControlApi {
                     new java.util.ArrayList<>();
             if (array != null) {
                 for (int i = 0; i < array.length(); i++) {
+                    JSONObject sourceJson = array.optJSONObject(i);
                     com.airmusic.player.library.NetSource source =
                             com.airmusic.player.library.NetSource.fromJson(
-                                    array.optJSONObject(i));
+                                    sourceJson, sourceJson == null ? ""
+                                            : sourceJson.optString("password", ""));
                     if (source != null) list.add(source);
                 }
             }
@@ -926,7 +929,6 @@ public final class ControlApi {
 
     private static JSONObject deleteFiles(Context context, byte[] body) {
         JSONObject result = new JSONObject();
-        String root = new Prefs(context).getMusicFolderPath();
         int deleted = 0;
         JSONArray failed = new JSONArray();
         try {
@@ -941,8 +943,7 @@ public final class ControlApi {
                         failed.put(path);
                         continue;
                     }
-                    if (root != null && !root.isEmpty()
-                            && !file.getAbsolutePath().startsWith(root)) {
+                    if (!isLibraryFile(context, file)) {
                         // Only songs inside the configured library may be removed.
                         failed.put(path);
                         continue;
@@ -1019,6 +1020,26 @@ public final class ControlApi {
         return path.startsWith(prefix) ? path.substring(prefix.length()) : path;
     }
 
+    /** Every configured local library root, including the legacy first path. */
+    private static List<File> libraryRoots(Context context) {
+        List<File> roots = new java.util.ArrayList<>();
+        Prefs prefs = new Prefs(context);
+        for (MusicPath path : prefs.getLocalPaths()) {
+            if (path.path != null && !path.path.trim().isEmpty()) {
+                roots.add(new File(path.path));
+            }
+        }
+        if (roots.isEmpty()) {
+            roots.add(StorageHelper.getMusicDir(prefs.getMusicFolderPath()));
+        }
+        return roots;
+    }
+
+    private static boolean isLibraryFile(Context context, File file) {
+        return PathSecurity.isRegularFile(file)
+                && PathSecurity.isInsideAny(libraryRoots(context), file);
+    }
+
     private static String nullToEmpty(String value) {
         return value == null ? "" : value;
     }
@@ -1036,7 +1057,8 @@ public final class ControlApi {
         byte[] data = json.toString().getBytes(StandardCharsets.UTF_8);
         String header = "HTTP/1.1 " + code + " " + (code == 200 ? "OK" : "Error") + "\r\n"
                 + "Content-Type: application/json; charset=utf-8\r\n"
-                + "Access-Control-Allow-Origin: *\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "X-Content-Type-Options: nosniff\r\n"
                 + "Content-Length: " + data.length + "\r\n"
                 + "Connection: close\r\n\r\n";
         out.write(header.getBytes(StandardCharsets.ISO_8859_1));

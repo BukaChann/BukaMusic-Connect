@@ -53,4 +53,6 @@ Key.txt
 /r1.json
 /r2.json
 /rel_*.json
+*-private.pem
+.update-signing/
 

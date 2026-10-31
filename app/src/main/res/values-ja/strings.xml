@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BukaMusic</string>
+    <string name="app_name">BukaMusic Connect</string>
     <string name="bottom_bar_title">AirPlay</string>
     <string name="now_playing">再生中</string>
     <string name="unknown_title">不明な曲</string>
@@ -43,6 +43,10 @@
     <string name="transfer_supported">対応形式：%1$s</string>
     <string name="transfer_server_failed">サービスの起動に失敗しました。ネットワーク接続を確認してください。</string>
     <string name="transfer_server_started">転送サービスが起動しました。アップロード待機中…</string>
+    <string name="transfer_pair_code">ペアリングコード：%1$s</string>
+    <string name="transfer_rotate_pairing">再ペアリング</string>
+    <string name="transfer_rotate_pairing_confirm">現在のコードを無効にし、ペアリング済みのコントローラーを切断します。新しいQRコードを読み取るか、新しいコードを入力してください。</string>
+    <string name="transfer_pairing_rotated">新しいコードを発行しました。接続中のコントローラーは再ペアリングが必要です</string>
     <string name="transfer_qr_failed">QRコードの生成に失敗しました：%1$s</string>
     <string name="transfer_no_network">ネットワークに接続されていません。Wi-Fiに接続してください。</string>
     <string name="connect_wifi">Wi-Fiに接続</string>
@@ -52,7 +56,7 @@
     <string name="library_no_permission">ストレージ権限がありません。設定で権限を許可してください。</string>
     <string name="library_scan_failed">スキャンに失敗しました：%1$s</string>
     <string name="transfer_address">同じLAN内で、ブラウザに次のアドレスを入力してください：</string>
-    <string name="transfer_hint">QRコードを読み取るか、ブラウザでアドレスを開くと、音楽ファイルをこの端末にアップロードできます（音楽形式のみ対応。他のファイルは拒否されます）。アップロード完了後にライブラリが自動更新されます。</string>
+    <string name="transfer_hint">QRコードを読み取ると安全にペアリングしてアップロードできます。デスクトップ版では上のコードを入力してください。コードはこの端末だけに表示され、音楽形式のみ対応です。</string>
     <string name="notification_channel_name">バックグラウンド再生</string>
     <string name="notification_channel_desc">バックグラウンド再生とAirPlay受信の状態を表示</string>
     <string name="notification_airplay_receiving">AirPlay 受信中</string>
@@ -108,7 +112,7 @@
     <string name="about_developer_value">WeiFanchuan</string>
     <string name="about_developer_github">GitHub：WeiFanchuan</string>
     <string name="about_project">プロジェクト</string>
-    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic</string>
+    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic-Connect</string>
     <string name="about_open_source">オープンソース</string>
     <string name="about_open_source_hint">このアプリは以下のオープンソースコンポーネントを使用しています：</string>
     <string name="os_airreceiver">AirReceiver / DroidAirPlay（GPL-3.0）・AirPlay受信エンジン</string>
@@ -257,6 +261,7 @@
     <string name="net_path_folder_smb">共有名/フォルダ 例：Music/Lossless</string>
     <string name="net_path_user">ユーザー名（空欄可）</string>
     <string name="net_path_password">パスワード（空欄可）</string>
+    <string name="net_path_password_saved">保存済み。空欄のままなら変更しません</string>
     <string name="net_path_domain">ドメイン / ワークグループ（SMB・空欄可）</string>
     <string name="net_path_test">接続テスト</string>
     <string name="net_path_save">保存</string>

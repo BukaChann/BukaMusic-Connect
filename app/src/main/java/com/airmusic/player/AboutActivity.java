@@ -32,7 +32,7 @@ import java.io.File;
 public class AboutActivity extends BaseActivity {
 
     private static final String URL_DEVELOPER = "https://github.com/HAN-BAK";
-    private static final String URL_PROJECT = "https://github.com/HAN-BAK/BukaMusic";
+    private static final String URL_PROJECT = "https://github.com/HAN-BAK/BukaMusic-Connect";
     private static final String URL_AIRRECEIVER = "https://github.com/phlo/airreceiver";
     private static final String URL_EXOPLAYER = "https://github.com/androidx/media";
     private static final String URL_JMDNS = "https://github.com/jmdns/jmdns";

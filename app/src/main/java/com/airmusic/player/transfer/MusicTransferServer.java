@@ -4,22 +4,30 @@ import android.content.Context;
 import android.util.Log;
 
 import com.airmusic.player.library.AudioExt;
+import com.airmusic.player.util.PathSecurity;
 import com.airmusic.player.util.Prefs;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.security.MessageDigest;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Tiny embedded HTTP server that lets a phone on the same LAN upload music
@@ -30,6 +38,19 @@ public final class MusicTransferServer {
 
     private static final String TAG = "MusicTransferServer";
     private static final int DEFAULT_PORT = 8080;
+    private static final int MAX_THREADS = 8;
+    private static final int MAX_QUEUED_REQUESTS = 16;
+    private static final int MAX_HEADER_BYTES = 64 * 1024;
+    private static final int MAX_HEADER_LINE_BYTES = 8 * 1024;
+    private static final int MAX_JSON_BYTES = 256 * 1024;
+    private static final long MAX_UPLOAD_BYTES = 512L * 1024 * 1024;
+    private static final long MAX_CONCURRENT_UPLOAD_BYTES = 1024L * 1024 * 1024;
+    private static final int SOCKET_TIMEOUT_MS = 15000;
+    private static final int REQUESTS_PER_WINDOW = 120;
+    private static final long REQUEST_WINDOW_MS = 10000L;
+    private static final int AUTH_FAILURES_PER_WINDOW = 5;
+    private static final long AUTH_WINDOW_MS = 60000L;
+    private static final long AUTH_BLOCK_MS = 60000L;
     /** One server per process; the background service keeps it alive. */
     private static MusicTransferServer shared;
 
@@ -48,11 +69,18 @@ public final class MusicTransferServer {
      */
     private final java.util.List<Listener> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final ConcurrentHashMap<String, RequestWindow> requestWindows =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, AuthWindow> authWindows =
+            new ConcurrentHashMap<>();
+    private final AtomicLong lastRateCleanup = new AtomicLong();
+    private final AtomicLong activeUploadBytes = new AtomicLong();
     private ServerSocket serverSocket;
-    private ExecutorService executor;
+    private ThreadPoolExecutor executor;
     private int port = DEFAULT_PORT;
     private Context context;
     private DeviceDiscovery discovery;
+    private volatile String cachedAccessToken;
 
     public MusicTransferServer(String musicFolderPath, byte[] iconPng, String language,
                                Listener listener) {
@@ -126,7 +154,17 @@ public final class MusicTransferServer {
             return 0;
         }
         running.set(true);
-        executor = Executors.newCachedThreadPool();
+        executor = new ThreadPoolExecutor(2, MAX_THREADS, 30L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(MAX_QUEUED_REQUESTS),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "buka-http");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                (runnable, pool) -> {
+                    // The accept loop owns the socket; overload is handled there.
+                    throw new java.util.concurrent.RejectedExecutionException("queue full");
+                });
         executor.execute(this::acceptLoop);
         if (context != null) {
             discovery = new DeviceDiscovery(context, this);
@@ -159,11 +197,48 @@ public final class MusicTransferServer {
         return port;
     }
 
+    /** Pairing token shown by the device and accepted as a bearer credential. */
+    public String getAccessToken() {
+        if (context == null) throw new IllegalStateException("server context missing");
+        String token = cachedAccessToken;
+        if (token != null && !token.isEmpty()) return token;
+        synchronized (this) {
+            if (cachedAccessToken == null || cachedAccessToken.isEmpty()) {
+                cachedAccessToken = new Prefs(context).getControlToken();
+            }
+            return cachedAccessToken;
+        }
+    }
+
+    /** Invalidates every previously paired client and returns the new token. */
+    public synchronized String rotateAccessToken() {
+        if (context == null) throw new IllegalStateException("server context missing");
+        cachedAccessToken = new Prefs(context).rotateControlToken();
+        return cachedAccessToken;
+    }
+
+    private String accessToken() {
+        return getAccessToken();
+    }
+
     private void acceptLoop() {
         while (running.get()) {
             try {
                 Socket socket = serverSocket.accept();
-                executor.execute(() -> handle(socket));
+                try {
+                    executor.execute(() -> handle(socket));
+                } catch (java.util.concurrent.RejectedExecutionException overloaded) {
+                    try {
+                        sendResponse(socket.getOutputStream(), 503, "text/plain",
+                                "Server busy".getBytes(StandardCharsets.UTF_8), false);
+                    } catch (IOException ignored) {
+                    } finally {
+                        try {
+                            socket.close();
+                        } catch (IOException ignored) {
+                        }
+                    }
+                }
             } catch (IOException e) {
                 if (running.get()) {
                     Log.w(TAG, "accept failed", e);
@@ -174,59 +249,124 @@ public final class MusicTransferServer {
 
     private void handle(Socket socket) {
         try {
-            socket.setSoTimeout(30000);
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
-            String requestLine = reader.readLine();
-            if (requestLine == null) return;
-            String[] parts = requestLine.split(" ");
-            String method = parts.length > 0 ? parts[0] : "";
-            String path = parts.length > 1 ? parts[1] : "/";
+            socket.setSoTimeout(SOCKET_TIMEOUT_MS);
+            socket.setTcpNoDelay(true);
+            String remote = socket.getInetAddress() == null
+                    ? "unknown" : socket.getInetAddress().getHostAddress();
+            InputStream in = new BufferedInputStream(socket.getInputStream());
+            OutputStream out = socket.getOutputStream();
 
-            long contentLength = -1;
-            String fileName = null;
-            String range = null;
-            String line;
-            while ((line = reader.readLine()) != null && !line.isEmpty()) {
-                String lower = line.toLowerCase();
-                if (lower.startsWith("content-length:")) {
-                    contentLength = Long.parseLong(line.substring(15).trim());
-                } else if (lower.startsWith("x-file-name:")) {
-                    fileName = URLDecoder.decode(line.substring(13).trim(), "UTF-8");
-                } else if (lower.startsWith("range:")) {
-                    // Needed by the desktop console to seek inside a streamed song.
-                    range = line.substring(6).trim();
-                }
+            RequestHead request;
+            try {
+                request = readRequestHead(in);
+            } catch (HeaderLimitException e) {
+                sendResponse(out, 431, "text/plain", "Request headers too large",
+                        false);
+                return;
+            }
+            if (request == null) return;
+            if (!allowRequest(remote)) {
+                sendResponse(out, 429, "text/plain", "Too many requests", false);
+                return;
             }
 
-            OutputStream out = socket.getOutputStream();
-            if ("GET".equals(method)) {
-                if (ControlApi.handle(context, method, path, null, out, range)) {
-                    // handled by the JSON API
-                } else if ("/icon.png".equals(path)) {
+            String path = request.path;
+            String pathOnly = path == null ? "" : path;
+            int question = pathOnly.indexOf('?');
+            String query = question < 0 ? "" : pathOnly.substring(question + 1);
+            if (question >= 0) pathOnly = pathOnly.substring(0, question);
+            String method = request.method;
+            String range = request.headers.get("range");
+            boolean apiRequest = pathOnly.startsWith("/api/");
+            boolean infoRequest = apiRequest && "/api/info".equals(pathOnly)
+                    && "GET".equals(method);
+            String queryToken = queryParameter(query, "token");
+
+            if ("GET".equals(method) && "/".equals(pathOnly)
+                    && queryToken != null && !queryToken.isEmpty()) {
+                if (!isTokenValid(queryToken) || isAuthBlocked(remote)) {
+                    recordAuthFailure(remote);
+                    sendResponse(out, 401, "text/plain", "Pairing credential invalid",
+                            false);
+                    return;
+                }
+                String cookie = "buka_pair=" + accessToken()
+                        + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800";
+                sendRedirect(out, "/", cookie);
+                return;
+            }
+
+            boolean authorized = requestIsAuthorized(request, remote);
+            if (!infoRequest && !authorized) {
+                if ("/icon.png".equals(pathOnly)) {
                     serveIcon(out);
-                } else {
-                    servePage(out);
+                    return;
                 }
-            } else if ("POST".equals(method) && "/upload".equals(path)) {
-                byte[] body = contentLength > 0
-                        ? readBody(reader, (int) contentLength)
-                        : new byte[0];
-                handleUpload(fileName, body, out);
-            } else if ("POST".equals(method) && path != null && path.startsWith("/api/")) {
-                byte[] body = contentLength > 0
-                        ? readBody(reader, (int) contentLength)
-                        : new byte[0];
+                if (request.headers.get("authorization") != null
+                        || request.headers.get("cookie") != null) {
+                    recordAuthFailure(remote);
+                }
+                sendResponse(out, 401, "text/plain",
+                        "Pair this device before using the service", false);
+                return;
+            }
+
+            if ("GET".equals(method) && "/icon.png".equals(pathOnly)) {
+                serveIcon(out);
+            } else if ("GET".equals(method) && "/".equals(pathOnly)) {
+                servePage(out);
+            } else if ("GET".equals(method) && apiRequest) {
+                if (!ControlApi.handle(context, method, path, null, out, range)) {
+                    sendResponse(out, 404, "text/plain", "Not found",
+                            false);
+                }
+            } else if ("POST".equals(method) && apiRequest) {
+                long contentLength = contentLength(request);
+                if (contentLength < 0 || contentLength > MAX_JSON_BYTES) {
+                    sendResponse(out, 413, "text/plain", "Request body too large",
+                            false);
+                    return;
+                }
+                byte[] body = readBody(in, (int) contentLength);
                 if (!ControlApi.handle(context, method, path, body, out, range)) {
-                    sendResponse(out, 404, "text/plain",
-                            "Not found".getBytes(StandardCharsets.UTF_8));
+                    sendResponse(out, 404, "text/plain", "Not found",
+                            false);
                 }
+            } else if ("POST".equals(method) && "/upload".equals(pathOnly)) {
+                long contentLength = contentLength(request);
+                if (contentLength <= 0) {
+                    sendResponse(out, 411, "text/plain", "Content-Length required",
+                            false);
+                    return;
+                }
+                if (contentLength > MAX_UPLOAD_BYTES) {
+                    sendResponse(out, 413, "text/plain", "File too large", false);
+                    return;
+                }
+                String encodedName = request.headers.get("x-file-name");
+                String fileName = encodedName == null ? ""
+                        : URLDecoder.decode(encodedName.trim(), "UTF-8");
+                long active = activeUploadBytes.addAndGet(contentLength);
+                if (active > MAX_CONCURRENT_UPLOAD_BYTES) {
+                    activeUploadBytes.addAndGet(-contentLength);
+                    sendResponse(out, 429, "text/plain",
+                            "Too many concurrent uploads", false);
+                    return;
+                }
+                try {
+                    handleUpload(fileName, in, contentLength, out);
+                } finally {
+                    activeUploadBytes.addAndGet(-contentLength);
+                }
+            } else if (apiRequest) {
+                sendResponse(out, 405, "text/plain", "Method not allowed", false);
             } else {
-                sendResponse(out, 404, "text/plain", "Not found".getBytes(StandardCharsets.UTF_8));
+                sendResponse(out, 404, "text/plain", "Not found", false);
             }
             out.flush();
         } catch (Exception e) {
-            Log.w(TAG, "request failed", e);
+            // Deliberately do not include request headers or credentials in logs.
+            Log.w(TAG, "request failed: " + e.getClass().getSimpleName());
         } finally {
             try {
                 socket.close();
@@ -235,9 +375,10 @@ public final class MusicTransferServer {
         }
     }
 
-    private void handleUpload(String fileName, byte[] body, OutputStream out) throws IOException {
-        String cleanName = fileName == null ? "" : new File(fileName).getName();
-        if (cleanName.isEmpty() || body.length == 0) {
+    private void handleUpload(String fileName, InputStream in, long length, OutputStream out)
+            throws IOException {
+        String cleanName = fileName == null ? "" : fileName.trim();
+        if (!PathSecurity.isSafeFileName(cleanName)) {
             String msg = t(language, "文件名或内容为空", "File name or content is empty",
                     "ファイル名または内容が空です", "파일 이름 또는 내용이 비어 있습니다");
             sendJson(out, 400, "ERR:" + msg);
@@ -254,19 +395,21 @@ public final class MusicTransferServer {
             return;
         }
         String folder = getMusicFolderPath();
-        File dir = folder == null || folder.isEmpty()
+        File requestedDir = folder == null || folder.isEmpty()
                 ? new File(android.os.Environment.getExternalStorageDirectory(), "Music")
                 : new File(folder);
-        if (!dir.exists() && !dir.mkdirs()) {
+        final File dir;
+        try {
+            dir = PathSecurity.prepareRoot(requestedDir);
+        } catch (IOException e) {
             String msg = t(language, "无法创建音乐目录", "Cannot create the music folder",
                     "音楽フォルダを作成できません", "음악 폴더를 만들 수 없습니다");
             sendJson(out, 500, "ERR:" + msg);
             notifyUploaded(cleanName, false, msg);
             return;
         }
-        // Refuse the upload when the music disk would drop below 80 MB free.
         long usable = dir.getUsableSpace();
-        if (usable - com.airmusic.player.util.StorageHelper.MIN_FREE_BYTES < body.length) {
+        if (usable - com.airmusic.player.util.StorageHelper.MIN_FREE_BYTES < length) {
             String msg = t(language, "上传后剩余空间将不足80MB，已取消上传",
                     "Uploading this file would leave less than 80 MB free; upload cancelled.",
                     "このファイルをアップロードすると空き容量が80MB未満になるため、アップロードをキャンセルしました",
@@ -275,16 +418,61 @@ public final class MusicTransferServer {
             notifyUploaded(cleanName, false, msg);
             return;
         }
+
         File target = new File(dir, cleanName);
-        // Same-name files overwrite the existing file.
-        try (FileOutputStream fos = new FileOutputStream(target)) {
-            fos.write(body);
+        File targetPath;
+        try {
+            targetPath = PathSecurity.normalizeForCreate(target);
+            if (!dir.equals(targetPath.getParentFile())) {
+                throw new IOException("target escaped music root");
+            }
+        } catch (IOException e) {
+            String msg = t(language, "上传路径无效", "Invalid upload path",
+                    "アップロード先が無効です", "업로드 경로가 올바르지 않습니다");
+            sendJson(out, 400, "ERR:" + msg);
+            notifyUploaded(cleanName, false, msg);
+            return;
         }
-        String msg = t(language, "上传成功：", "Upload succeeded: ",
-                "アップロード成功：", "업로드 성공: ") + target.getName();
-        sendJson(out, 200, "OK:" + msg);
-        notifyUploaded(target.getName(), true,
-                t(language, "上传成功", "Upload succeeded", "アップロード成功", "업로드 성공"));
+
+        File partial = File.createTempFile(".buka-upload-", ".part", dir);
+        try {
+            try (FileOutputStream fos = new FileOutputStream(partial)) {
+                byte[] buffer = new byte[64 * 1024];
+                long remaining = length;
+                while (remaining > 0) {
+                    int read = in.read(buffer, 0,
+                            (int) Math.min(buffer.length, remaining));
+                    if (read < 0) throw new EOFException("upload interrupted");
+                    fos.write(buffer, 0, read);
+                    remaining -= read;
+                }
+                fos.getFD().sync();
+            }
+            moveIntoPlace(partial, targetPath);
+            String msg = t(language, "上传成功：", "Upload succeeded: ",
+                    "アップロード成功：", "업로드 성공: ") + target.getName();
+            sendJson(out, 200, "OK:" + msg);
+            notifyUploaded(target.getName(), true,
+                    t(language, "上传成功", "Upload succeeded",
+                            "アップロード成功", "업로드 성공"));
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            partial.delete();
+            String msg = t(language, "上传中断或写入失败", "Upload interrupted or could not be saved",
+                    "アップロードが中断されたか保存できませんでした",
+                    "업로드가 중단되었거나 저장하지 못했습니다");
+            sendJson(out, 400, "ERR:" + msg);
+            notifyUploaded(cleanName, false, msg);
+        }
+    }
+
+    private static void moveIntoPlace(File partial, File target) throws IOException {
+        // POSIX rename replaces an existing file atomically.
+        if (partial.renameTo(target)) return;
+        if (target.exists() && !target.delete()) {
+            throw new IOException("cannot replace existing file");
+        }
+        if (!partial.renameTo(target)) throw new IOException("move failed");
     }
 
     private void servePage(OutputStream out) throws IOException {
@@ -302,30 +490,295 @@ public final class MusicTransferServer {
 
     private static void sendJson(OutputStream out, int code, String message) throws IOException {
         sendResponse(out, code, "text/plain; charset=utf-8",
-                message.getBytes(StandardCharsets.UTF_8));
+                message.getBytes(StandardCharsets.UTF_8), false);
     }
 
     private static void sendResponse(OutputStream out, int code, String contentType, byte[] body)
             throws IOException {
-        String head = "HTTP/1.1 " + code + " OK\r\n"
+        sendResponse(out, code, contentType, body, true);
+    }
+
+    private static void sendResponse(OutputStream out, int code, String contentType, String body,
+                                     boolean authenticated) throws IOException {
+        sendResponse(out, code, contentType, body.getBytes(StandardCharsets.UTF_8),
+                authenticated);
+    }
+
+    private static void sendResponse(OutputStream out, int code, String contentType, byte[] body,
+                                     boolean authenticated) throws IOException {
+        String head = "HTTP/1.1 " + code + " " + statusText(code) + "\r\n"
                 + "Content-Type: " + contentType + "\r\n"
                 + "Content-Length: " + body.length + "\r\n"
                 + "Connection: close\r\n"
-                + "Access-Control-Allow-Origin: *\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "X-Content-Type-Options: nosniff\r\n"
+                + "Referrer-Policy: no-referrer\r\n"
+                + (authenticated
+                    ? "Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; "
+                    + "style-src 'unsafe-inline'; img-src 'self' data:\r\n"
+                    : "")
                 + "\r\n";
         out.write(head.getBytes(StandardCharsets.ISO_8859_1));
         out.write(body);
+        out.flush();
     }
 
-    private static byte[] readBody(BufferedReader reader, int length) throws IOException {
+    private static void sendRedirect(OutputStream out, String location, String cookie)
+            throws IOException {
+        String head = "HTTP/1.1 303 See Other\r\n"
+                + "Location: " + location + "\r\n"
+                + "Set-Cookie: " + cookie + "\r\n"
+                + "Content-Length: 0\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "Referrer-Policy: no-referrer\r\n"
+                + "Connection: close\r\n\r\n";
+        out.write(head.getBytes(StandardCharsets.ISO_8859_1));
+        out.flush();
+    }
+
+    private static byte[] readBody(InputStream in, int length) throws IOException {
         byte[] body = new byte[length];
         int read = 0;
         while (read < length) {
-            int r = reader.read();
-            if (r < 0) break;
-            body[read++] = (byte) r;
+            int r = in.read(body, read, length - read);
+            if (r < 0) throw new EOFException("request body interrupted");
+            read += r;
         }
         return body;
+    }
+
+    private static RequestHead readRequestHead(InputStream in)
+            throws IOException, HeaderLimitException {
+        String first = readHeaderLine(in);
+        if (first == null || first.isEmpty()) return null;
+        String[] parts = first.split(" ", 3);
+        if (parts.length < 2) throw new HeaderLimitException();
+        RequestHead result = new RequestHead(parts[0], parts[1]);
+        int total = first.length();
+        for (int count = 0; count < 128; count++) {
+            String line = readHeaderLine(in);
+            if (line == null) throw new EOFException("headers interrupted");
+            if (line.isEmpty()) return result;
+            total += line.length();
+            if (total > MAX_HEADER_BYTES) throw new HeaderLimitException();
+            int colon = line.indexOf(':');
+            if (colon <= 0) continue;
+            String name = line.substring(0, colon).trim().toLowerCase(java.util.Locale.ROOT);
+            result.headers.put(name, line.substring(colon + 1).trim());
+        }
+        throw new HeaderLimitException();
+    }
+
+    private static String readHeaderLine(InputStream in) throws IOException,
+            HeaderLimitException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        while (true) {
+            int value = in.read();
+            if (value < 0) return buffer.size() == 0 ? null
+                    : new String(buffer.toByteArray(), StandardCharsets.ISO_8859_1);
+            if (value == '\n') {
+                byte[] bytes = buffer.toByteArray();
+                int length = bytes.length;
+                if (length > 0 && bytes[length - 1] == '\r') length--;
+                return new String(bytes, 0, length, StandardCharsets.ISO_8859_1);
+            }
+            if (buffer.size() >= MAX_HEADER_LINE_BYTES) throw new HeaderLimitException();
+            buffer.write(value);
+        }
+    }
+
+    private static long contentLength(RequestHead request) {
+        String value = request.headers.get("content-length");
+        if (value == null || value.trim().isEmpty()) return -1;
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException ignored) {
+            return -1;
+        }
+    }
+
+    private boolean requestIsAuthorized(RequestHead request, String remote) {
+        if (isAuthBlocked(remote)) return false;
+        String authorization = request.headers.get("authorization");
+        if (authorization != null) {
+            String prefix = "Bearer ";
+            if (authorization.regionMatches(true, 0, prefix, 0, prefix.length())
+                    && isTokenValid(authorization.substring(prefix.length()).trim())) {
+                return true;
+            }
+        }
+        String cookie = request.headers.get("cookie");
+        if (cookie == null) return false;
+        for (String part : cookie.split(";")) {
+            String trimmed = part.trim();
+            if (trimmed.startsWith("buka_pair=")
+                    && isTokenValid(trimmed.substring("buka_pair=".length()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isTokenValid(String candidate) {
+        if (candidate == null || candidate.isEmpty()) return false;
+        byte[] expected = accessToken().getBytes(StandardCharsets.UTF_8);
+        byte[] actual = candidate.trim().toLowerCase(java.util.Locale.ROOT)
+                .getBytes(StandardCharsets.UTF_8);
+        return MessageDigest.isEqual(expected, actual);
+    }
+
+    private boolean allowRequest(String remote) {
+        long now = System.currentTimeMillis();
+        RequestWindow window = requestWindows.get(remote);
+        if (window == null) {
+            RequestWindow created = new RequestWindow(now);
+            RequestWindow existing = requestWindows.putIfAbsent(remote, created);
+            window = existing == null ? created : existing;
+        }
+        synchronized (window) {
+            if (now - window.startedAt >= REQUEST_WINDOW_MS) {
+                window.startedAt = now;
+                window.count = 0;
+            }
+            if (++window.count > REQUESTS_PER_WINDOW) return false;
+        }
+        cleanupRateWindows(now);
+        return true;
+    }
+
+    private boolean isAuthBlocked(String remote) {
+        AuthWindow window = authWindows.get(remote);
+        if (window == null) return false;
+        synchronized (window) {
+            return nowBlocked(window, System.currentTimeMillis());
+        }
+    }
+
+    private void recordAuthFailure(String remote) {
+        long now = System.currentTimeMillis();
+        AuthWindow window = authWindows.get(remote);
+        if (window == null) {
+            AuthWindow created = new AuthWindow(now);
+            AuthWindow existing = authWindows.putIfAbsent(remote, created);
+            window = existing == null ? created : existing;
+        }
+        synchronized (window) {
+            if (now - window.startedAt >= AUTH_WINDOW_MS) {
+                window.startedAt = now;
+                window.failures = 0;
+                window.blockedUntil = 0L;
+            }
+            if (++window.failures >= AUTH_FAILURES_PER_WINDOW) {
+                window.blockedUntil = now + AUTH_BLOCK_MS;
+            }
+        }
+    }
+
+    private static boolean nowBlocked(AuthWindow window, long now) {
+        if (window.blockedUntil > now) return true;
+        if (window.blockedUntil != 0L) {
+            window.blockedUntil = 0L;
+            window.failures = 0;
+            window.startedAt = now;
+        }
+        return false;
+    }
+
+    private void cleanupRateWindows(long now) {
+        if (now - lastRateCleanup.get() < 60000L
+                || !lastRateCleanup.compareAndSet(lastRateCleanup.get(), now)) {
+            return;
+        }
+        java.util.Iterator<Map.Entry<String, RequestWindow>> requests =
+                requestWindows.entrySet().iterator();
+        while (requests.hasNext()) {
+            Map.Entry<String, RequestWindow> entry = requests.next();
+            RequestWindow window = entry.getValue();
+            synchronized (window) {
+                if (now - window.startedAt > REQUEST_WINDOW_MS * 2) requests.remove();
+            }
+        }
+        java.util.Iterator<Map.Entry<String, AuthWindow>> auth =
+                authWindows.entrySet().iterator();
+        while (auth.hasNext()) {
+            Map.Entry<String, AuthWindow> entry = auth.next();
+            AuthWindow window = entry.getValue();
+            synchronized (window) {
+                if (now - window.startedAt > AUTH_WINDOW_MS
+                        && window.blockedUntil <= now) {
+                    auth.remove();
+                }
+            }
+        }
+    }
+
+    private static String queryParameter(String query, String name) {
+        if (query == null || query.isEmpty()) return null;
+        for (String part : query.split("&")) {
+            int equals = part.indexOf('=');
+            if (equals <= 0) continue;
+            if (name.equals(part.substring(0, equals))) {
+                try {
+                    return URLDecoder.decode(part.substring(equals + 1), "UTF-8");
+                } catch (Exception ignored) {
+                    return null;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String statusText(int code) {
+        switch (code) {
+            case 200: return "OK";
+            case 303: return "See Other";
+            case 400: return "Bad Request";
+            case 401: return "Unauthorized";
+            case 404: return "Not Found";
+            case 405: return "Method Not Allowed";
+            case 411: return "Length Required";
+            case 413: return "Payload Too Large";
+            case 415: return "Unsupported Media Type";
+            case 429: return "Too Many Requests";
+            case 431: return "Request Header Fields Too Large";
+            case 500: return "Internal Server Error";
+            case 503: return "Service Unavailable";
+            case 507: return "Insufficient Storage";
+            default: return "Error";
+        }
+    }
+
+    private static final class RequestHead {
+        final String method;
+        final String path;
+        final Map<String, String> headers = new HashMap<>();
+
+        RequestHead(String method, String path) {
+            this.method = method;
+            this.path = path;
+        }
+    }
+
+    private static final class HeaderLimitException extends Exception {
+    }
+
+    private static final class RequestWindow {
+        long startedAt;
+        int count;
+
+        RequestWindow(long startedAt) {
+            this.startedAt = startedAt;
+        }
+    }
+
+    private static final class AuthWindow {
+        long startedAt;
+        long blockedUntil;
+        int failures;
+
+        AuthWindow(long startedAt) {
+            this.startedAt = startedAt;
+        }
     }
 
     private static String t(String lang, String zh, String en, String ja, String ko) {

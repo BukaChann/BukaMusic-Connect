@@ -1,12 +1,12 @@
-<h1 align="center">BukaMusic</h1>
+<h1 align="center">BukaMusic Connect</h1>
 
-<p align="center"><img src="docs/screenshots/icon.png" width="112" alt="BukaMusic"></p>
+<p align="center"><img src="docs/screenshots/icon.png" width="112" alt="BukaMusic Connect"></p>
 
-<p align="center">安卓音乐播放器：本地音乐 / AirPlay 接收 / 多房间同步 / 歌词动画 / 屏保时钟</p>
+<p align="center"><strong>布卡聚音</strong> · 互联终端设备端：本地音乐 / AirPlay 接收 / 多房间同步 / 歌词动画 / 屏保时钟</p>
 
-<p align="center">配套 Windows 桌面控制台：<a href="https://github.com/HAN-BAK/BukaMusicDesktop">HAN-BAK/BukaMusicDesktop</a></p>
+<p align="center">手机端主应用：<a href="https://github.com/HAN-BAK/BukaMusic">BukaMusic</a> · 桌面端：<a href="https://github.com/HAN-BAK/BukaMusic-Desktop">BukaMusic Desktop</a></p>
 
-<p align="center">下载：<a href="https://github.com/HAN-BAK/BukaMusic/releases">Releases</a>（Android 6.0+）</p>
+<p align="center">下载：<a href="https://gitee.com/hanhan2048/BukaMusic-Releases/releases">Gitee Releases</a>（Android 6.0+）</p>
 
 ## 功能
 
@@ -41,7 +41,7 @@
 
 ![多房间同步](docs/screenshots/06-multiroom.png)
 
-- 主控把本地音乐同步到同一局域网内的其它 BukaMusic 设备；
+- 主控把本地音乐同步到同一局域网内的其它布卡聚音设备；
 - 时钟对齐 + 自动校准，长时间播放不漂移；
 - 接收端可以控制主控的播放 / 暂停 / 切歌 / 进度；
 - AirPlay 抢占时自动断开 / 恢复多房间播放。
@@ -70,7 +70,7 @@
 - 四语言：中文 / English / 日本語 / 한국어；
 - 音乐路径、网络曲库、播放方式、均衡器、屏保、后台运行、诊断；
 - 启动时自动检查更新（每天一次），设置 → 关于 → 检查更新 可手动检查；
-- 音乐传输：扫码或浏览器打开 `http://设备IP:端口` 上传歌曲；
+- 音乐传输：用设备「音乐传输」页的二维码配对后上传；桌面控制台首次连接需输入页面上的随机配对码；
 - 可设为桌面（HOME）应用，像桌面一样直接启动。
 
 ## 使用方法
@@ -78,10 +78,17 @@
 1. 安装后首次启动授予「音乐和音频」读取权限。
 2. 设置 → 音乐路径：选择本地音乐文件夹；需要 NAS 时点「添加网络路径」，填写
    WebDAV / SMB / FTP 地址与账号。
-3. 曲库选歌开始播放；播放页点击封面进入歌词，整页上滑进入屏保。
-4. AirPlay：手机控制中心选择本机名称即可投送。
-5. 多房间：底栏左侧「多房间」→ 勾选设备 → 确认；接收端会自动进入同步播放。
-6. 更新：设置 → 关于 → 检查更新，或等待启动时自动提示。
+3. 使用 Windows 控制台或网页上传时，先在设备上打开「音乐传输」完成配对；配对码只显示在设备上，可随时重新配对使旧控制端失效。
+4. 曲库选歌开始播放；播放页点击封面进入歌词，整页上滑进入屏保。
+5. AirPlay：手机控制中心选择本机名称即可投送。
+6. 多房间：底栏左侧「多房间」→ 勾选设备 → 确认；接收端会自动进入同步播放。
+7. 更新：设置 → 关于 → 检查更新，或等待启动时自动提示。
+
+## 安全发布
+
+- 网络音乐密码保存在 Android Keystore 加密区，控制接口使用随机配对令牌；
+- 发布版不再内置对象存储凭据，自动更新只接受 ECDSA 签名的更新清单及匹配当前安装包证书的 APK；
+- 发布与签名配置见 [docs/UPDATE_SECURITY.md](docs/UPDATE_SECURITY.md)。
 
 ## 构建方法
 
@@ -93,5 +100,6 @@
 
 产物：`app/build/outputs/apk/release/app-release.apk`。
 
-release 默认使用 `~/.android/debug.keystore` 签名（与 Android Studio 生成的一致）；
-要使用自己的签名，修改 `app/build.gradle` 里的 `signingConfigs.release` 即可。
+release 构建不再回退到调试证书。请在受保护的构建环境中设置
+`BUKA_RELEASE_STORE_FILE`、`BUKA_RELEASE_STORE_PASSWORD`、`BUKA_RELEASE_KEY_ALIAS`
+和 `BUKA_RELEASE_KEY_PASSWORD`；具体说明见 `docs/UPDATE_SECURITY.md`。

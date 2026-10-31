@@ -65,7 +65,7 @@
                     android:layout_height="64dp"
                     android:contentDescription="@string/app_name"
                     android:scaleType="fitCenter"
-                    android:src="@mipmap/ic_launcher"
+                    android:src="@drawable/brand_mark"
                     app:shapeAppearanceOverlay="@style/ShapeAppearance.AirMusic.Icon"
                     app:strokeWidth="0dp" />
 

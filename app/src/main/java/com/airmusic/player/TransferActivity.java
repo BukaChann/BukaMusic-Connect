@@ -11,7 +11,6 @@ import android.widget.ImageView;
 import android.widget.TextView;
 
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
 
 import com.airmusic.player.library.AudioExt;
 import com.airmusic.player.library.MusicLibrary;
@@ -28,6 +27,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
+import com.airmusic.player.ui.BukaDialog;
 import com.airmusic.player.ui.BukaNotice;
 import com.airmusic.player.ui.BukaTheme;
 
@@ -36,6 +36,13 @@ public class TransferActivity extends BaseActivity {
     private MusicTransferServer server;
     /** 上传监听器：服务器是常驻单例，页面销毁时必须注销，否则页面被永久持有。 */
     private MusicTransferServer.Listener uploadListener;
+    private TextView txtAddress;
+    private TextView txtPairCode;
+    private TextView txtStatus;
+    private ImageView imgQr;
+    private com.google.android.material.button.MaterialButton btnRotatePairing;
+    private String localIp;
+    private int localPort;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshLibrary = () -> {
         // Merge refreshes when several files arrive back-to-back.
@@ -55,22 +62,24 @@ public class TransferActivity extends BaseActivity {
 
         findViewById(R.id.btn_back).setOnClickListener(v -> finish());
 
-        TextView txtAddress = findViewById(R.id.txt_address);
+        txtAddress = findViewById(R.id.txt_address);
+        txtPairCode = findViewById(R.id.txt_pair_code);
         // 地址做成和按钮同一套动态取色的胶囊卡片
         txtAddress.setBackground(com.airmusic.player.ui.ColorTheme.capsule(this));
         txtAddress.setTextColor(com.airmusic.player.ui.ColorTheme.tooltipText());
         int addrPadH = Math.round(18 * getResources().getDisplayMetrics().density);
         int addrPadV = Math.round(10 * getResources().getDisplayMetrics().density);
         txtAddress.setPadding(addrPadH, addrPadV, addrPadH, addrPadV);
-        TextView txtStatus = findViewById(R.id.txt_status);
+        txtPairCode.setTextColor(com.airmusic.player.ui.ColorTheme.textSecondary());
+        txtStatus = findViewById(R.id.txt_status);
         TextView txtFormats = findViewById(R.id.txt_formats);
-        ImageView imgQr = findViewById(R.id.img_qr);
+        imgQr = findViewById(R.id.img_qr);
+        btnRotatePairing = findViewById(R.id.btn_rotate_pairing);
         com.google.android.material.button.MaterialButton btnWifi =
                 findViewById(R.id.btn_connect_wifi);
 
         txtFormats.setText(getString(R.string.transfer_supported, AudioExt.supportedList()));
 
-        String folder = new Prefs(this).getMusicFolderPath();
         // The background service already runs the shared server (web page +
         // control API + discovery); reuse it so the address stays stable.
         server = MusicTransferServer.shared(this, readIcon(), new Prefs(this).getLanguage(), null);
@@ -86,9 +95,9 @@ public class TransferActivity extends BaseActivity {
                 });
         server.addListener(uploadListener);
 
-        int port = server.start();
-        String ip = getLocalIpv4();
-        if (port <= 0 || ip == null || ip.isEmpty()) {
+        localPort = server.start();
+        localIp = getLocalIpv4();
+        if (localPort <= 0 || localIp == null || localIp.isEmpty()) {
             // No usable LAN address (Wi-Fi / network not connected): offer a
             // shortcut to the system Wi-Fi settings instead of failing.
             txtStatus.setText(R.string.transfer_no_network);
@@ -104,9 +113,36 @@ public class TransferActivity extends BaseActivity {
             });
             return;
         }
-        String url = "http://" + ip + ":" + port + "/";
-        txtAddress.setText(ip + " : " + port);
+        btnRotatePairing.setOnClickListener(v -> {
+            BukaDialog.confirm(this, getString(R.string.transfer_rotate_pairing),
+                    getString(R.string.transfer_rotate_pairing_confirm),
+                    getString(android.R.string.ok), () -> {
+                        server.rotateAccessToken();
+                        renderPairing();
+                        BukaNotice.show(this, R.string.transfer_pairing_rotated);
+                    }).show();
+        });
+        renderPairing();
+    }
+
+    private void renderPairing() {
+        String token;
+        try {
+            token = server.getAccessToken();
+        } catch (Throwable t) {
+            txtStatus.setText(R.string.transfer_server_failed);
+            txtAddress.setVisibility(android.view.View.GONE);
+            txtPairCode.setVisibility(android.view.View.GONE);
+            imgQr.setVisibility(android.view.View.GONE);
+            btnRotatePairing.setVisibility(android.view.View.GONE);
+            return;
+        }
+        String url = "http://" + localIp + ":" + localPort + "/?token=" + token;
+        txtAddress.setText(localIp + " : " + localPort);
+        txtPairCode.setText(getString(R.string.transfer_pair_code,
+                token.replaceAll("(.{4})(?=.{4})", "$1 ").trim().toUpperCase()));
         txtStatus.setText(R.string.transfer_server_started);
+        btnRotatePairing.setVisibility(android.view.View.VISIBLE);
 
         try {
             boolean[][] matrix = QrEncoder.encode(url);

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BukaMusic</string>
+    <string name="app_name">BukaMusic Connect</string>
     <string name="bottom_bar_title">AirPlay</string>
     <string name="now_playing">Now Playing</string>
     <string name="unknown_title">Unknown Song</string>
@@ -43,6 +43,10 @@
     <string name="transfer_supported">Supported formats: %1$s</string>
     <string name="transfer_server_failed">Failed to start the service. Please check the network connection.</string>
     <string name="transfer_server_started">Transfer service running. Waiting for uploads…</string>
+    <string name="transfer_pair_code">Pairing code: %1$s</string>
+    <string name="transfer_rotate_pairing">Re-pair</string>
+    <string name="transfer_rotate_pairing_confirm">This invalidates the current pairing code and disconnects paired controllers. Scan the new QR code or enter the new code to continue.</string>
+    <string name="transfer_pairing_rotated">Pairing code rotated; paired controllers must pair again</string>
     <string name="transfer_qr_failed">QR code generation failed: %1$s</string>
     <string name="transfer_no_network">Not connected to a network. Please connect to Wi-Fi.</string>
     <string name="connect_wifi">Connect to Wi-Fi</string>
@@ -52,7 +56,7 @@
     <string name="library_no_permission">No storage permission. Please grant it in Settings first.</string>
     <string name="library_scan_failed">Scan failed: %1$s</string>
     <string name="transfer_address">On the same LAN, open this address in a browser:</string>
-    <string name="transfer_hint">Scan the QR code or open the address in a browser to upload music files to this device (music formats only; other files are rejected). The library refreshes automatically after uploads.</string>
+    <string name="transfer_hint">Scan the QR code to pair and upload securely. Enter the code above in the desktop console. Keep the code on this device; music formats only.</string>
     <string name="notification_channel_name">Background Playback</string>
     <string name="notification_channel_desc">Shows background music playback and AirPlay receiving status</string>
     <string name="notification_airplay_receiving">Receiving AirPlay</string>
@@ -108,7 +112,7 @@
     <string name="about_developer_value">WeiFanchuan</string>
     <string name="about_developer_github">GitHub: WeiFanchuan</string>
     <string name="about_project">Project</string>
-    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic</string>
+    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic-Connect</string>
     <string name="about_open_source">Open Source</string>
     <string name="about_open_source_hint">This app uses the following open-source components:</string>
     <string name="os_airreceiver">AirReceiver / DroidAirPlay (GPL-3.0) · AirPlay receiver engine</string>
@@ -257,6 +261,7 @@
     <string name="net_path_folder_smb">Share/folder, e.g. Music/Lossless</string>
     <string name="net_path_user">User name (optional)</string>
     <string name="net_path_password">Password (optional)</string>
+    <string name="net_path_password_saved">Password saved; leave blank to keep it</string>
     <string name="net_path_domain">Domain / workgroup (SMB, optional)</string>
     <string name="net_path_test">Test connection</string>
     <string name="net_path_save">Save</string>

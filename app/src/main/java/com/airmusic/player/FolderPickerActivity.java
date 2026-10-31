@@ -25,6 +25,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 
 import com.airmusic.player.library.AudioExt;
+import com.airmusic.player.util.PathSecurity;
 import com.airmusic.player.util.BlurBackground;
 
 import java.io.File;
@@ -243,8 +244,7 @@ public class FolderPickerActivity extends BaseActivity {
                 Arrays.sort(mounts, (a, b) -> a.getName().compareTo(b.getName()));
                 for (File mount : mounts) {
                     if (!mount.isDirectory() || mount.getName().startsWith(".")) continue;
-                    if (primary != null && (mount.equals(primary)
-                            || mount.getAbsolutePath().startsWith(primary.getAbsolutePath() + "/"))) {
+                    if (primary != null && PathSecurity.isSameOrInside(primary, mount)) {
                         continue;
                     }
                     roots.add(mount);
@@ -357,11 +357,8 @@ public class FolderPickerActivity extends BaseActivity {
     }
 
     private boolean isInsideRoots(File dir) {
-        String path = dir.getAbsolutePath();
         for (File root : roots) {
-            if (path.equals(root.getAbsolutePath()) || path.startsWith(root.getAbsolutePath() + "/")) {
-                return true;
-            }
+            if (PathSecurity.isSameOrInside(root, dir)) return true;
         }
         return false;
     }

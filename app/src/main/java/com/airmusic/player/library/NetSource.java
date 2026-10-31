@@ -69,6 +69,10 @@ public final class NetSource {
         return user != null && !user.isEmpty();
     }
 
+    public boolean hasPassword() {
+        return password != null && !password.isEmpty();
+    }
+
     /** 列表里显示的一行（不含密码）。 */
     public String label() {
         StringBuilder sb = new StringBuilder();
@@ -119,12 +123,18 @@ public final class NetSource {
         json.put("port", port);
         json.put("path", path == null ? "" : path);
         json.put("user", user == null ? "" : user);
-        json.put("password", password == null ? "" : password);
+        // This object is returned by the LAN API, so it must never carry a
+        // password. The secure store persists the credential separately.
+        json.put("passwordConfigured", hasPassword());
         json.put("domain", domain == null ? "" : domain);
         return json;
     }
 
     public static NetSource fromJson(JSONObject json) {
+        return fromJson(json, "");
+    }
+
+    public static NetSource fromJson(JSONObject json, String password) {
         if (json == null) return null;
         String host = json.optString("host", "");
         if (host.isEmpty()) return null;
@@ -133,7 +143,7 @@ public final class NetSource {
         if (id.isEmpty()) id = newId();
         return new NetSource(id, type, json.optString("name", ""), host,
                 json.optInt("port", 0), json.optString("path", ""),
-                json.optString("user", ""), json.optString("password", ""),
+                json.optString("user", ""), password == null ? "" : password,
                 json.optString("domain", ""));
     }
 }

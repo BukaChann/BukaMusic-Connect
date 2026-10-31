@@ -2,6 +2,33 @@ plugins {
     id 'com.android.application'
 }
 
+def buildConfigString = { value ->
+    '"' + String.valueOf(value)
+            .replace('\\', '\\\\')
+            .replace('"', '\\"')
+            .replace('\r', '\\r')
+            .replace('\n', '\\n') + '"'
+}
+def updateManifestUrl = System.getenv('BUKA_UPDATE_MANIFEST_URL')
+        ?: project.findProperty('bukaUpdateManifestUrl')
+        ?: 'https://gitee.com/hanhan2048/BukaMusic-Releases/raw/master/latest.json'
+def updatePublicKeyFile = rootProject.file('update-signing-public.pem')
+def updateManifestPublicKey = System.getenv('BUKA_UPDATE_MANIFEST_PUBLIC_KEY')
+        ?: project.findProperty('bukaUpdateManifestPublicKey')
+        ?: (updatePublicKeyFile.exists()
+                ? updatePublicKeyFile.getText('UTF-8').trim() : '')
+def updateAllowedHosts = System.getenv('BUKA_UPDATE_ALLOWED_HOSTS')
+        ?: project.findProperty('bukaUpdateAllowedHosts')
+        ?: 'gitee.com,raw.giteeusercontent.com'
+def releaseStorePath = System.getenv('BUKA_RELEASE_STORE_FILE')
+        ?: project.findProperty('bukaReleaseStoreFile')
+def releaseStorePassword = System.getenv('BUKA_RELEASE_STORE_PASSWORD')
+        ?: project.findProperty('bukaReleaseStorePassword')
+def releaseKeyAlias = System.getenv('BUKA_RELEASE_KEY_ALIAS')
+        ?: project.findProperty('bukaReleaseKeyAlias')
+def releaseKeyPassword = System.getenv('BUKA_RELEASE_KEY_PASSWORD')
+        ?: project.findProperty('bukaReleaseKeyPassword')
+
 android {
     namespace 'com.airmusic.player'
     compileSdk 34
@@ -10,16 +37,30 @@ android {
         applicationId "com.airmusic.player"
         minSdk 23
         targetSdk 34
-        versionCode 326
-        versionName "3.2.6"
+        versionCode 327
+        versionName "3.2.7"
+        // Public release trust configuration. The private signing key must stay
+        // in the protected release environment, never in the repository.
+        buildConfigField 'String', 'UPDATE_MANIFEST_URL',
+                buildConfigString(updateManifestUrl)
+        buildConfigField 'String', 'UPDATE_MANIFEST_PUBLIC_KEY',
+                buildConfigString(updateManifestPublicKey)
+        buildConfigField 'String', 'UPDATE_ALLOWED_HOSTS',
+                buildConfigString(updateAllowedHosts)
+    }
+
+    buildFeatures {
+        buildConfig true
     }
 
     signingConfigs {
         release {
-            storeFile file(System.getProperty("user.home") + "/.android/debug.keystore")
-            storePassword "android"
-            keyAlias "androiddebugkey"
-            keyPassword "android"
+            if (releaseStorePath) {
+                storeFile file(releaseStorePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
         }
     }
 
@@ -27,7 +68,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.release
+            if (releaseStorePath) signingConfig signingConfigs.release
         }
     }
 
@@ -70,4 +111,6 @@ dependencies {
     // 动态图标（Lottie）：载入 / 等待这类动画用它，图标本身的路径动画仍用
     // 原生 AnimatedVectorDrawable（矢量、无额外资源、TV 盒子上更省）。
     implementation 'com.airbnb.android:lottie:6.6.0'
+
+    testImplementation 'junit:junit:4.13.2'
 }

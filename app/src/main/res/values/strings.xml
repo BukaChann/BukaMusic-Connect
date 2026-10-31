@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">BukaMusic</string>
+    <string name="app_name">布卡聚音</string>
     <string name="bottom_bar_title">AirPlay</string>
     <string name="now_playing">正在播放</string>
     <string name="unknown_title">未知歌曲</string>
@@ -43,6 +43,10 @@
     <string name="transfer_supported">支持格式：%1$s</string>
     <string name="transfer_server_failed">服务启动失败，请检查网络连接</string>
     <string name="transfer_server_started">传输服务已启动，等待上传…</string>
+    <string name="transfer_pair_code">配对码：%1$s</string>
+    <string name="transfer_rotate_pairing">重新配对</string>
+    <string name="transfer_rotate_pairing_confirm">将作废当前配对码，并让已配对的控制端断开。之后需要重新扫描二维码或输入新配对码，确定继续吗？</string>
+    <string name="transfer_pairing_rotated">配对码已更新，旧控制端需要重新配对</string>
     <string name="transfer_qr_failed">二维码生成失败：%1$s</string>
     <string name="transfer_no_network">未连接网络，请先连接 WiFi</string>
     <string name="connect_wifi">连接 WiFi</string>
@@ -52,7 +56,7 @@
     <string name="library_no_permission">没有存储权限，请先在设置中授权</string>
     <string name="library_scan_failed">扫描失败：%1$s</string>
     <string name="transfer_address">同一局域网内，手机/电脑浏览器输入：</string>
-    <string name="transfer_hint">扫描二维码或浏览器打开地址，即可上传音乐文件到本机曲库（仅支持音乐格式，其他文件会被拒绝）。上传完成后曲库自动刷新。</string>
+    <string name="transfer_hint">扫描二维码即可安全配对并上传；电脑控制台可输入上方配对码。配对码只展示在本机，请勿提供给不可信的人。仅支持音乐格式，上传完成后曲库自动刷新。</string>
     <string name="notification_channel_name">后台播放</string>
     <string name="notification_channel_desc">显示后台音乐播放与 AirPlay 接收状态</string>
     <string name="notification_airplay_receiving">AirPlay 接收中</string>
@@ -108,7 +112,7 @@
     <string name="about_developer_value">WeiFanchuan</string>
     <string name="about_developer_github">GitHub：WeiFanchuan</string>
     <string name="about_project">项目地址</string>
-    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic</string>
+    <string name="about_project_value">https://github.com/HAN-BAK/BukaMusic-Connect</string>
     <string name="about_open_source">开源项目</string>
     <string name="about_open_source_hint">本项目使用了以下开源组件：</string>
     <string name="os_airreceiver">AirReceiver / DroidAirPlay（GPL-3.0）· AirPlay 接收引擎</string>
@@ -259,6 +263,7 @@
     <string name="net_path_folder_smb">共享名/目录，例如 Music/无损</string>
     <string name="net_path_user">用户名（可留空）</string>
     <string name="net_path_password">密码（可留空）</string>
+    <string name="net_path_password_saved">已保存密码；留空则保持不变</string>
     <string name="net_path_domain">域 / 工作组（SMB 用，可留空）</string>
     <string name="net_path_test">测试连接</string>
     <string name="net_path_save">保存</string>

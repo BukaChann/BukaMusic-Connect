@@ -32,7 +32,8 @@ public final class SmbClient {
 
     private static synchronized CIFSContext context(NetSource source) {
         String cacheKey = source.id + "|" + source.host + "|" + source.effectivePort()
-                + "|" + source.user + "|" + source.password + "|" + source.domain;
+                + "|" + source.user + "|" + passwordFingerprint(source.password)
+                + "|" + source.domain;
         CIFSContext cached = CONTEXTS.get(cacheKey);
         if (cached != null) return cached;
         Properties props = new Properties();
@@ -55,6 +56,21 @@ public final class SmbClient {
                         source.user, source.password));
         CONTEXTS.put(cacheKey, ctx);
         return ctx;
+    }
+
+    private static String passwordFingerprint(String password) {
+        if (password == null || password.isEmpty()) return "";
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(password.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(digest.length * 2);
+            for (byte value : digest) {
+                out.append(String.format(java.util.Locale.US, "%02x", value & 0xff));
+            }
+            return out.toString();
+        } catch (Throwable ignored) {
+            return Integer.toHexString(password.hashCode());
+        }
     }
 
     private static String urlOf(NetSource source, String relativePath) {

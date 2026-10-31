@@ -1,5 +1,7 @@
 package com.airmusic.player.net;
 
+import android.os.Build;
+
 import com.airmusic.player.library.NetSource;
 
 import java.io.IOException;
@@ -7,7 +9,6 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 
@@ -56,8 +57,9 @@ public final class WebDavClient {
         if (!source.hasCredentials()) return;
         String token = source.user + ":" + (source.password == null ? "" : source.password);
         conn.setRequestProperty("Authorization",
-                "Basic " + Base64.getEncoder().encodeToString(
-                        token.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                "Basic " + android.util.Base64.encodeToString(
+                        token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        android.util.Base64.NO_WRAP));
     }
 
     /** 列一层目录（Depth: 1）。 */
@@ -113,8 +115,9 @@ public final class WebDavClient {
             if (source.hasCredentials()) {
                 String token = source.user + ":" + (source.password == null ? "" : source.password);
                 head.append("Authorization: Basic ")
-                        .append(Base64.getEncoder().encodeToString(
-                                token.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                        .append(android.util.Base64.encodeToString(
+                                token.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                                android.util.Base64.NO_WRAP))
                         .append("\r\n");
             }
             head.append("Content-Length: ").append(bodyBytes.length).append("\r\n\r\n");
@@ -312,7 +315,10 @@ public final class WebDavClient {
             applyAuth(head, source);
             head.setConnectTimeout(TIMEOUT_MS);
             head.setReadTimeout(TIMEOUT_MS);
-            if (head.getResponseCode() < 400) length = head.getContentLengthLong();
+            if (head.getResponseCode() < 400) {
+                length = Build.VERSION.SDK_INT >= 24
+                        ? head.getContentLengthLong() : head.getContentLength();
+            }
             head.disconnect();
         } catch (Throwable ignored) {
         }

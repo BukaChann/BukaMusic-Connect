@@ -53,6 +53,8 @@ public final class Prefs {
     private static final String KEY_BACKGROUND_RUN = "background_run";
     private static final String KEY_EQ_GAINS = "eq_gains";
     private static final String KEY_EQ_PRESETS = "eq_presets";
+    private static final String KEY_CONTROL_TOKEN = "control_api_token";
+    private static final String CREDENTIAL_NET_PREFIX = "net_password_";
 
     private static final int EQ_BANDS = 10;
 
@@ -227,14 +229,29 @@ public final class Prefs {
         java.util.List<NetSource> out = new java.util.ArrayList<>();
         String raw = sp.getString(KEY_NET_SOURCES, null);
         if (raw == null || raw.isEmpty()) return out;
+        boolean migrated = false;
         try {
             org.json.JSONArray array = new org.json.JSONArray(raw);
             for (int i = 0; i < array.length(); i++) {
-                NetSource source = NetSource.fromJson(array.optJSONObject(i));
+                JSONObject json = array.optJSONObject(i);
+                if (json == null) continue;
+                String legacy = json.optString("password", "");
+                String id = json.optString("id", "");
+                String stored = id.isEmpty() ? "" : SecureCredentials.get(
+                        context, CREDENTIAL_NET_PREFIX + id);
+                if (!legacy.isEmpty()) {
+                    if (stored.isEmpty()) {
+                        SecureCredentials.put(context, CREDENTIAL_NET_PREFIX + id, legacy);
+                        stored = legacy;
+                    }
+                    migrated = true;
+                }
+                NetSource source = NetSource.fromJson(json, stored);
                 if (source != null) out.add(source);
             }
         } catch (Throwable ignored) {
         }
+        if (migrated) saveNetSources(out);
         return out;
     }
 
@@ -284,14 +301,80 @@ public final class Prefs {
     }
 
     private void saveNetSources(java.util.List<NetSource> sources) {
+        java.util.List<NetSource> existing = getNetSourcesWithoutMigration();
+        java.util.Map<String, String> oldPasswords = new java.util.HashMap<>();
+        for (NetSource source : existing) {
+            oldPasswords.put(source.id, source.password);
+        }
         org.json.JSONArray array = new org.json.JSONArray();
         for (NetSource source : sources) {
             try {
+                String old = oldPasswords.get(source.id);
+                String password = source.password == null || source.password.isEmpty()
+                        ? (old == null ? "" : old) : source.password;
+                if (password.isEmpty()) {
+                    SecureCredentials.remove(context, CREDENTIAL_NET_PREFIX + source.id);
+                } else {
+                    SecureCredentials.put(context, CREDENTIAL_NET_PREFIX + source.id, password);
+                }
                 array.put(source.toJson());
             } catch (Throwable ignored) {
             }
         }
+        for (NetSource old : existing) {
+            boolean kept = false;
+            for (NetSource source : sources) {
+                if (old.id.equals(source.id)) {
+                    kept = true;
+                    break;
+                }
+            }
+            if (!kept) SecureCredentials.remove(context, CREDENTIAL_NET_PREFIX + old.id);
+        }
         sp.edit().putString(KEY_NET_SOURCES, array.toString()).apply();
+    }
+
+    /**
+     * Reads persisted metadata without writing anything. This prevents
+     * saveNetSources() from recursively invoking migration.
+     */
+    private java.util.List<NetSource> getNetSourcesWithoutMigration() {
+        java.util.List<NetSource> out = new java.util.ArrayList<>();
+        try {
+            org.json.JSONArray array = new org.json.JSONArray(
+                    sp.getString(KEY_NET_SOURCES, "[]"));
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject json = array.optJSONObject(i);
+                if (json == null) continue;
+                String id = json.optString("id", "");
+                String password = id.isEmpty() ? "" : SecureCredentials.get(
+                        context, CREDENTIAL_NET_PREFIX + id);
+                if (password.isEmpty()) password = json.optString("password", "");
+                NetSource source = NetSource.fromJson(json, password);
+                if (source != null) out.add(source);
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    /** Long-lived random bearer token for the local control API. */
+    public String getControlToken() {
+        String token = SecureCredentials.get(context, KEY_CONTROL_TOKEN);
+        if (!token.isEmpty()) return token;
+        token = SecureCredentials.newToken();
+        if (!SecureCredentials.put(context, KEY_CONTROL_TOKEN, token)) {
+            throw new IllegalStateException("secure token storage unavailable");
+        }
+        return token;
+    }
+
+    public String rotateControlToken() {
+        String token = SecureCredentials.newToken();
+        if (!SecureCredentials.put(context, KEY_CONTROL_TOKEN, token)) {
+            throw new IllegalStateException("secure token storage unavailable");
+        }
+        return token;
     }
 
     /** 上次网络扫描的时刻（elapsedRealtime）；0 表示从未扫过。 */

@@ -40,6 +40,17 @@ public final class AirplayLyricLocator {
     /** 连续被合理性检查拒绝的次数（连续 2 次就强制重新对齐）。 */
     private static volatile int rejectedInARow;
     private static volatile boolean running;
+    /**
+     * 固定的 Runnable 对象。
+     *
+     * <p>以前每次用 {@code AirplayLyricLocator::calibrate} 新建方法引用，
+     * Handler.removeCallbacks 按对象身份比较，根本删不掉旧任务：歌词页每 500ms
+     * 渲染一次就排一个 5 秒后的校准，越积越多，弱设备上校准线程被洪水般占满，
+     * 表现就是 AirPlay 歌词整体延迟、卡顿（强设备还能扛住）。
+     */
+    private static final Runnable CALIBRATE = AirplayLyricLocator::calibrate;
+    /** 是否已经排了一次校准（同一次只允许一个，避免重复排）。 */
+    private static volatile boolean calibratePending;
 
     private AirplayLyricLocator() {
     }
@@ -126,7 +137,8 @@ public final class AirplayLyricLocator {
     /** AirPlay 结束 / 切走时调用：清缓冲、删缓存、停止校准。 */
     public static void stop(Context context) {
         running = false;
-        MAIN.removeCallbacks(AirplayLyricLocator::calibrate);
+        calibratePending = false;
+        MAIN.removeCallbacks(CALIBRATE);
         positionMs = -1L;
         referencePcm = null;
         AirplayPcmTap.clear();
@@ -139,15 +151,18 @@ public final class AirplayLyricLocator {
     }
 
     private static void schedule() {
-        MAIN.removeCallbacks(AirplayLyricLocator::calibrate);
-        Log.i(TAG, "schedule: running=" + running + " ref="
-                + (referencePcm == null ? "null" : referencePcm.length));
+        // 已经排了一次就不要再重置计时（歌词页刷新很频繁，重置会让校准永远等不到）
+        if (calibratePending) return;
         // 已经停了就别再排，否则会变成空转死循环
         if (!running) return;
-        MAIN.postDelayed(AirplayLyricLocator::calibrate, CALIBRATE_INTERVAL_MS);
+        calibratePending = true;
+        Log.i(TAG, "schedule: running=" + running + " ref="
+                + (referencePcm == null ? "null" : referencePcm.length));
+        MAIN.postDelayed(CALIBRATE, CALIBRATE_INTERVAL_MS);
     }
 
     private static void calibrate() {
+        calibratePending = false;
         final short[] reference = referencePcm;
         Log.i(TAG, "calibrate: running=" + running + " ref="
                 + (reference == null ? "null" : reference.length)
@@ -159,6 +174,7 @@ public final class AirplayLyricLocator {
         }
         EXECUTOR.execute(() -> {
             try {
+                long snapshotAt = android.os.SystemClock.elapsedRealtime();
                 short[] buffer = AirplayPcmTap.snapshot();
                 Log.i(TAG, "calibrating: buffer=" + buffer.length);
                 if (buffer.length < MIN_BUFFER_SECONDS * AirplayPcmTap.TARGET_RATE) {
@@ -167,6 +183,11 @@ public final class AirplayLyricLocator {
                 long found = LyricPositionLocator.locate(reference, buffer);
                 if (found >= 0) {
                     long now = android.os.SystemClock.elapsedRealtime();
+                    // 互相关在弱设备上要跑好几秒：匹配结果对应的是「拍快照的那一刻」，
+                    // 计算期间音频还在往前走，必须把这段耗时补上，否则歌词会固定
+                    // 落后设备性能差的那几秒（强设备算得快，所以看不出来）。
+                    found += Math.max(0L, now - snapshotAt);
+                    Log.i(TAG, "match took " + (now - snapshotAt) + "ms");
                     boolean hasPrevious = positionMs >= 0 && lastMatchAt > 0;
                     long expected = hasPrevious ? positionMs + (now - lastMatchAt) : found;
                     // 合理性检查：和「上次位置 + 时钟推进」差太多的，基本是互相关

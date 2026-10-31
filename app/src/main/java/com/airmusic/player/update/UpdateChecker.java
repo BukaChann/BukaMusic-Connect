@@ -2,61 +2,70 @@ package com.airmusic.player.update;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
+import android.util.Base64;
 
 import androidx.core.content.FileProvider;
 
+import com.airmusic.player.BuildConfig;
+
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.security.PublicKey;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.LinkedHashSet;
 import java.util.Locale;
-import java.util.TimeZone;
-
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
- * 自动更新：从缤纷云 S4 的 {@code Android/latest.json} 读取最新版本信息，
- * 需要时下载同目录下的安装包并交给系统安装器。
- *
- * <p>存储桶是私有的，所以这里用访问密钥在本地生成 S3 SigV4 预签名 URL
- * （只对 GET 生效，链接一小时过期），不必把桶设成公开读。
+ * Secure updater: a trusted ECDSA-signed manifest identifies one HTTPS APK.
+ * The APK size, SHA-256 digest and signing certificate are all verified before
+ * the system installer is opened. No long-lived storage credentials ship in
+ * the client.
  */
 public final class UpdateChecker {
 
-    private static final String ENDPOINT = "https://s3.bitiful.net";
-    private static final String HOST = "s3.bitiful.net";
-    private static final String BUCKET = "bukamusic";
-    private static final String REGION = "cn-east-1";
-    private static final String ACCESS_KEY = "fXjRFy17EQZTzGdSV1trjrjZ";
-    private static final String SECRET_KEY = "2Z7hEapt9IdcZlgLTe2th1SZJpr09Sy";
-    private static final String KEY_LATEST = "Android/latest.json";
-    private static final long URL_TTL_SECONDS = 3600L;
+    private static final int MANIFEST_LIMIT = 64 * 1024;
+    private static final int SIGNATURE_LIMIT = 16 * 1024;
+    private static final long APK_LIMIT = 512L * 1024 * 1024;
+    private static final Pattern SAFE_VERSION =
+            Pattern.compile("[0-9A-Za-z][0-9A-Za-z._-]{0,31}");
+    private static final Pattern SHA256 =
+            Pattern.compile("[0-9a-fA-F]{64}");
 
-    /** latest.json 的内容。 */
+    /** Verified contents of latest.json. */
     public static final class Info {
         public final int versionCode;
         public final String versionName;
-        public final String key;
+        public final String url;
         public final String notes;
         public final long size;
+        public final String sha256;
 
-        Info(int versionCode, String versionName, String key, String notes, long size) {
+        Info(int versionCode, String versionName, String url, String notes,
+             long size, String sha256) {
             this.versionCode = versionCode;
             this.versionName = versionName;
-            this.key = key;
+            this.url = url;
             this.notes = notes;
             this.size = size;
+            this.sha256 = sha256;
         }
     }
 
@@ -65,18 +74,19 @@ public final class UpdateChecker {
     }
 
     public interface Progress {
-        /** @return false 表示用户取消 */
+        /** @return false when the user cancels. */
         boolean onProgress(int percent);
     }
 
     private UpdateChecker() {
     }
 
-    /** 当前安装包的 versionCode。 */
     public static int currentVersionCode(Context context) {
         try {
-            return (int) context.getPackageManager()
-                    .getPackageInfo(context.getPackageName(), 0).getLongVersionCode();
+            PackageInfo info = context.getPackageManager()
+                    .getPackageInfo(context.getPackageName(), 0);
+            return Build.VERSION.SDK_INT >= 28
+                    ? (int) info.getLongVersionCode() : info.versionCode;
         } catch (Throwable t) {
             return 0;
         }
@@ -91,19 +101,13 @@ public final class UpdateChecker {
         }
     }
 
-    /** 后台线程读取 latest.json。 */
+    /** Reads and cryptographically verifies the signed release manifest. */
     public static void check(final Callback callback) {
         new Thread(() -> {
             Info info = null;
             String error = null;
             try {
-                String json = readText(presign(KEY_LATEST));
-                JSONObject o = new JSONObject(json);
-                info = new Info(o.optInt("versionCode", 0),
-                        o.optString("versionName", ""),
-                        o.optString("key", ""),
-                        o.optString("notes", ""),
-                        o.optLong("size", 0L));
+                info = readSignedManifest();
             } catch (Throwable t) {
                 error = t.getClass().getSimpleName() + ": " + t.getMessage();
             }
@@ -114,84 +118,277 @@ public final class UpdateChecker {
         }, "update-check").start();
     }
 
-    /**
-     * 下载安装包到应用私有目录，返回文件；失败抛异常。
-     */
-    public static File download(Context context, Info info, Progress progress) throws Exception {
-        if (info == null || info.key.isEmpty()) throw new Exception("empty info");
+    private static Info readSignedManifest() throws Exception {
+        String manifestUrl = BuildConfig.UPDATE_MANIFEST_URL == null
+                ? "" : BuildConfig.UPDATE_MANIFEST_URL.trim();
+        String publicKeyText = BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY == null
+                ? "" : BuildConfig.UPDATE_MANIFEST_PUBLIC_KEY.trim();
+        if (manifestUrl.isEmpty() || publicKeyText.isEmpty()) {
+            throw new IOException("signed update channel is not configured");
+        }
+        Set<String> hosts = allowedHosts();
+        byte[] manifest = readBytesLimited(manifestUrl, MANIFEST_LIMIT, hosts);
+        byte[] signature = readBytesLimited(manifestUrl + ".sig",
+                SIGNATURE_LIMIT, hosts);
+        verifyManifestSignature(manifest, signature, publicKeyText);
+
+        JSONObject object = new JSONObject(new String(manifest, StandardCharsets.UTF_8));
+        int versionCode = object.optInt("versionCode", 0);
+        String versionName = object.optString("versionName", "").trim();
+        String downloadUrl = object.optString("url", "").trim();
+        String notes = object.optString("notes", "");
+        long size = object.optLong("size", 0L);
+        String digest = object.optString("sha256", "").trim();
+
+        if (versionCode <= 0) throw new IOException("invalid versionCode");
+        if (!SAFE_VERSION.matcher(versionName).matches()) {
+            throw new IOException("invalid versionName");
+        }
+        if (notes.length() > 16000) notes = notes.substring(0, 16000);
+        requireAllowedUrl(downloadUrl, hosts);
+        if (size <= 0 || size > APK_LIMIT) throw new IOException("invalid update size");
+        if (!SHA256.matcher(digest).matches()) throw new IOException("invalid SHA-256");
+        return new Info(versionCode, versionName, downloadUrl, notes, size,
+                digest.toLowerCase(Locale.ROOT));
+    }
+
+    /** Downloads, verifies and atomically publishes the APK in app storage. */
+    public static File download(Context context, Info info, Progress progress)
+            throws Exception {
+        if (info == null) throw new IOException("missing update info");
+        if (info.versionCode <= currentVersionCode(context)) {
+            throw new IOException("update is not newer than installed version");
+        }
+        Set<String> hosts = allowedHosts();
+        requireAllowedUrl(info.url, hosts);
         File dir = new File(context.getFilesDir(), "update");
-        if (!dir.exists() && !dir.mkdirs()) throw new Exception("mkdir failed");
-        // 上一版下载的文件不再需要
-        File[] old = dir.listFiles();
-        if (old != null) {
-            for (File file : old) {
-                //noinspection ResultOfMethodCallIgnored
-                file.delete();
-            }
+        if (!dir.exists() && !dir.mkdirs()) throw new IOException("mkdir failed");
+        long usable = dir.getUsableSpace();
+        if (usable > 0 && usable < info.size + 16L * 1024 * 1024) {
+            throw new IOException("not enough free space");
         }
-        File out = new File(dir, "BukaMusic-" + info.versionName + ".apk");
+
         File part = new File(dir, "update.part");
-        HttpURLConnection conn = (HttpURLConnection) new URL(presign(info.key)).openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(30000);
-        conn.setInstanceFollowRedirects(true);
-        int code = conn.getResponseCode();
-        android.util.Log.i("UpdateChecker", "download " + info.key + " -> HTTP " + code);
-        if (code != HttpURLConnection.HTTP_OK) {
-            String body = "";
-            try (InputStream err = conn.getErrorStream()) {
-                if (err != null) {
-                    java.io.ByteArrayOutputStream errBuf = new java.io.ByteArrayOutputStream();
-                    byte[] buf = new byte[2048];
-                    int n;
-                    while ((n = err.read(buf)) > 0) errBuf.write(buf, 0, n);
-                    body = new String(errBuf.toByteArray(), StandardCharsets.UTF_8);
-                }
-            } catch (Throwable ignored) {
+        if (part.exists() && !part.delete()) throw new IOException("cannot reset temp file");
+        HttpURLConnection connection = openAllowedConnection(info.url, hosts);
+        try {
+            int code = connection.getResponseCode();
+            if (code != HttpURLConnection.HTTP_OK) {
+                throw new IOException("HTTP " + code);
             }
-            conn.disconnect();
-            throw new Exception("HTTP " + code + " " + body);
-        }
-        long total = -1;
-        try (InputStream in = conn.getInputStream();
-             FileOutputStream fos = new FileOutputStream(part)) {
-            total = info.size > 0 ? info.size : conn.getContentLengthLong();
-            byte[] buf = new byte[64 * 1024];
-            long done = 0;
+            long declared = contentLength(connection);
+            if (declared > APK_LIMIT) throw new IOException("file too large");
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            long done = 0L;
             int lastPercent = -1;
-            int n;
-            while ((n = in.read(buf)) > 0) {
-                fos.write(buf, 0, n);
-                done += n;
-                if (total > 0) {
-                    int percent = (int) (done * 100 / total);
+            try (InputStream input = connection.getInputStream();
+                 FileOutputStream output = new FileOutputStream(part)) {
+                byte[] buffer = new byte[64 * 1024];
+                int count;
+                while ((count = input.read(buffer)) >= 0) {
+                    if (count == 0) continue;
+                    done += count;
+                    if (done > info.size || done > APK_LIMIT) {
+                        throw new IOException("download exceeded declared size");
+                    }
+                    output.write(buffer, 0, count);
+                    digest.update(buffer, 0, count);
+                    int percent = (int) Math.min(100L, done * 100L / info.size);
                     if (percent != lastPercent) {
                         lastPercent = percent;
                         if (progress != null && !progress.onProgress(percent)) {
-                            throw new Exception("cancelled");
+                            throw new IOException("cancelled");
                         }
                     }
                 }
+                output.getFD().sync();
             }
-            fos.getFD().sync();
+            if (done != info.size) throw new IOException("download size mismatch");
+            String actual = hex(digest.digest());
+            if (!MessageDigest.isEqual(actual.getBytes(StandardCharsets.US_ASCII),
+                    info.sha256.getBytes(StandardCharsets.US_ASCII))) {
+                throw new IOException("SHA-256 mismatch");
+            }
+            if (!verifyApkSigner(context, part)) {
+                throw new IOException("APK signer mismatch");
+            }
+
+            File target = new File(dir, "BukaMusic-" + info.versionName + ".apk");
+            if (!part.renameTo(target)) {
+                if (target.exists() && !target.delete()) {
+                    throw new IOException("cannot replace old APK");
+                }
+                if (!part.renameTo(target)) throw new IOException("atomic move failed");
+            }
+            File[] old = dir.listFiles();
+            if (old != null) {
+                for (File file : old) {
+                    if (!file.equals(target) && file.isFile()) {
+                        // Downloaded update files are disposable.
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                    }
+                }
+            }
+            return target;
         } catch (Exception e) {
-            conn.disconnect();
             //noinspection ResultOfMethodCallIgnored
             part.delete();
             throw e;
+        } finally {
+            connection.disconnect();
         }
-        conn.disconnect();
-        if (out.exists() && !out.delete()) throw new Exception("delete old failed");
-        if (!part.renameTo(out)) throw new Exception("rename failed");
-        return out;
     }
 
-    /**
-     * 清掉已经下载过的安装包。
-     *
-     * <p>系统安装器点完"安装"后应用会被替换、进程重启，收不到"安装完成"的回调；
-     * 所以拉起安装器前先置一个待清理标记，下一次启动时清空 update 目录。
-     */
+    private static boolean verifyApkSigner(Context context, File apk) {
+        try {
+            PackageManager manager = context.getPackageManager();
+            int flags = Build.VERSION.SDK_INT >= 28
+                    ? PackageManager.GET_SIGNING_CERTIFICATES
+                    : PackageManager.GET_SIGNATURES;
+            PackageInfo installed = manager.getPackageInfo(context.getPackageName(), flags);
+            PackageInfo archive = manager.getPackageArchiveInfo(apk.getAbsolutePath(), flags);
+            byte[] expected = firstSigner(installed, flags);
+            byte[] actual = firstSigner(archive, flags);
+            return expected != null && actual != null
+                    && MessageDigest.isEqual(expected, actual);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static byte[] firstSigner(PackageInfo info, int flags) {
+        if (info == null) return null;
+        if (Build.VERSION.SDK_INT >= 28 && info.signingInfo != null) {
+            Signature[] signers = info.signingInfo.hasMultipleSigners()
+                    ? info.signingInfo.getApkContentsSigners()
+                    : info.signingInfo.getSigningCertificateHistory();
+            return signers != null && signers.length > 0
+                    ? signers[0].toByteArray() : null;
+        }
+        return info.signatures != null && info.signatures.length > 0
+                ? info.signatures[0].toByteArray() : null;
+    }
+
+    private static void verifyManifestSignature(byte[] manifest, byte[] signatureText,
+                                                String publicKeyText) throws Exception {
+        String base64 = new String(signatureText, StandardCharsets.US_ASCII)
+                .replaceAll("\\s+", "");
+        byte[] signature = Base64.decode(base64, Base64.NO_WRAP);
+        String key = publicKeyText
+                .replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s+", "");
+        PublicKey publicKey = KeyFactory.getInstance("EC").generatePublic(
+                new X509EncodedKeySpec(Base64.decode(key, Base64.NO_WRAP)));
+        java.security.Signature verifier =
+                java.security.Signature.getInstance("SHA256withECDSA");
+        verifier.initVerify(publicKey);
+        verifier.update(manifest);
+        if (!verifier.verify(signature)) {
+            throw new IOException("manifest signature invalid");
+        }
+    }
+
+    private static byte[] readBytesLimited(String value, int limit, Set<String> hosts)
+            throws IOException {
+        HttpURLConnection connection = openAllowedConnection(value, hosts);
+        try {
+            int code = connection.getResponseCode();
+            if (code != HttpURLConnection.HTTP_OK) {
+                throw new IOException("HTTP " + code);
+            }
+            long declared = contentLength(connection);
+            if (declared > limit) throw new IOException("response too large");
+            try (InputStream input = connection.getInputStream()) {
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                byte[] buffer = new byte[8192];
+                int total = 0;
+                int count;
+                while ((count = input.read(buffer)) >= 0) {
+                    if (count == 0) continue;
+                    total += count;
+                    if (total > limit) throw new IOException("response too large");
+                    output.write(buffer, 0, count);
+                }
+                return output.toByteArray();
+            }
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private static HttpURLConnection openAllowedConnection(String value, Set<String> hosts)
+            throws IOException {
+        String current = value;
+        for (int redirect = 0; redirect < 6; redirect++) {
+            URL url = new URL(current);
+            requireAllowedUrl(url.toString(), hosts);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setUseCaches(false);
+            int code = connection.getResponseCode();
+            if (code == HttpURLConnection.HTTP_OK) return connection;
+            if (code == 301 || code == 302 || code == 303
+                    || code == 307 || code == 308) {
+                String location = connection.getHeaderField("Location");
+                connection.disconnect();
+                if (location == null || location.trim().isEmpty()) {
+                    throw new IOException("redirect without location");
+                }
+                current = new URL(url, location).toString();
+                continue;
+            }
+            connection.disconnect();
+            throw new IOException("HTTP " + code);
+        }
+        throw new IOException("too many redirects");
+    }
+
+    private static void requireAllowedUrl(String value, Set<String> hosts) throws IOException {
+        URL url = new URL(value);
+        if (!"https".equalsIgnoreCase(url.getProtocol())) {
+            throw new IOException("HTTPS required");
+        }
+        if (url.getUserInfo() != null) throw new IOException("URL userinfo rejected");
+        int port = url.getPort();
+        if (port != -1 && port != 443) throw new IOException("non-standard port rejected");
+        String host = url.getHost();
+        if (host == null || !hosts.contains(host.toLowerCase(Locale.ROOT))) {
+            throw new IOException("download host not allowlisted");
+        }
+    }
+
+    private static Set<String> allowedHosts() {
+        Set<String> hosts = new LinkedHashSet<>();
+        String raw = BuildConfig.UPDATE_ALLOWED_HOSTS == null
+                ? "" : BuildConfig.UPDATE_ALLOWED_HOSTS;
+        for (String part : raw.split(",")) {
+            String host = part.trim().toLowerCase(Locale.ROOT);
+            if (!host.isEmpty()) hosts.add(host);
+        }
+        if (hosts.isEmpty()) throw new IllegalStateException("update host allowlist missing");
+        return hosts;
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder out = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) {
+            out.append(String.format(Locale.US, "%02x", value & 0xff));
+        }
+        return out.toString();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static long contentLength(HttpURLConnection connection) {
+        return Build.VERSION.SDK_INT >= 24
+                ? connection.getContentLengthLong()
+                : connection.getContentLength();
+    }
+
     public static void cleanDownloads(Context context) {
         File dir = new File(context.getFilesDir(), "update");
         File[] files = dir.listFiles();
@@ -200,26 +397,14 @@ public final class UpdateChecker {
             //noinspection ResultOfMethodCallIgnored
             file.delete();
         }
-        android.util.Log.i("UpdateChecker", "update dir cleaned");
     }
 
-    /** install() 的结果。 */
     public static final int INSTALL_LAUNCHED = 0;
     public static final int INSTALL_NEED_PERMISSION = 1;
     public static final int INSTALL_NO_INSTALLER = 2;
 
-    /**
-     * 拉起系统安装界面。
-     *
-     * @return {@link #INSTALL_LAUNCHED} / {@link #INSTALL_NEED_PERMISSION} /
-     *         {@link #INSTALL_NO_INSTALLER}
-     */
     public static int install(Context context, File apk) {
         boolean allowed = canInstall(context);
-        if (!allowed) {
-            // 有的电视盒子没有"安装未知应用"这一页，先试着直接拉起安装器；
-            // 被系统拦下时再看下面的提示。
-        }
         Uri uri = FileProvider.getUriForFile(context,
                 "com.airmusic.player.fileprovider", apk);
         Intent intent = new Intent(Intent.ACTION_VIEW)
@@ -235,13 +420,11 @@ public final class UpdateChecker {
         }
     }
 
-    /** 系统是否已经允许本应用安装 APK（Android 8+ 是「安装未知应用」开关）。 */
     public static boolean canInstall(Context context) {
         return Build.VERSION.SDK_INT < 26
                 || context.getPackageManager().canRequestPackageInstalls();
     }
 
-    /** 打开"安装未知应用 / 未知来源"设置页，尽量适配不同 ROM。 */
     public static boolean openUnknownSourcesSettings(Context context) {
         if (Build.VERSION.SDK_INT >= 26) {
             try {
@@ -262,95 +445,5 @@ public final class UpdateChecker {
             }
         }
         return false;
-    }
-
-    // ------------------------------------------------------------------
-    // S3 SigV4 预签名（GET）
-    // ------------------------------------------------------------------
-
-    private static String readText(String url) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setConnectTimeout(15000);
-        conn.setReadTimeout(15000);
-        try (InputStream in = conn.getInputStream()) {
-            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-            return new String(out.toByteArray(), StandardCharsets.UTF_8);
-        } finally {
-            conn.disconnect();
-        }
-    }
-
-    static String presign(String key) {
-        try {
-            SimpleDateFormat fmt = new SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", Locale.US);
-            fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
-            String amzDate = fmt.format(new Date());
-            String date = amzDate.substring(0, 8);
-            String scope = date + "/" + REGION + "/s3/aws4_request";
-            String credential = ACCESS_KEY + "/" + scope;
-            String canonicalUri = "/" + BUCKET + "/" + encodePath(key);
-            String canonicalQuery = "X-Amz-Algorithm=AWS4-HMAC-SHA256"
-                    + "&X-Amz-Credential=" + encode(credential)
-                    + "&X-Amz-Date=" + amzDate
-                    + "&X-Amz-Expires=" + URL_TTL_SECONDS
-                    + "&X-Amz-SignedHeaders=host";
-            String canonicalRequest = "GET\n" + canonicalUri + "\n" + canonicalQuery + "\n"
-                    + "host:" + HOST + "\n\nhost\nUNSIGNED-PAYLOAD";
-            String stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n"
-                    + sha256Hex(canonicalRequest);
-            byte[] signingKey = hmac(("AWS4" + SECRET_KEY).getBytes(StandardCharsets.UTF_8), date);
-            signingKey = hmac(signingKey, REGION);
-            signingKey = hmac(signingKey, "s3");
-            signingKey = hmac(signingKey, "aws4_request");
-            String signature = hex(hmac(signingKey, stringToSign));
-            return ENDPOINT + canonicalUri + "?" + canonicalQuery
-                    + "&X-Amz-Signature=" + signature;
-        } catch (Exception e) {
-            throw new IllegalStateException("presign failed", e);
-        }
-    }
-
-    private static byte[] hmac(byte[] key, String value) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(value.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String sha256Hex(String value) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        return hex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private static String hex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) sb.append(String.format(Locale.US, "%02x", b));
-        return sb.toString();
-    }
-
-    private static String encodePath(String key) {
-        StringBuilder sb = new StringBuilder();
-        for (String part : key.split("/", -1)) {
-            if (sb.length() > 0) sb.append('/');
-            sb.append(encode(part));
-        }
-        return sb.toString();
-    }
-
-    /** RFC 3986：只保留 A-Z a-z 0-9 - _ . ~，其余按 UTF-8 百分号编码。 */
-    private static String encode(String value) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
-            int c = b & 0xFF;
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-                    || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-                sb.append((char) c);
-            } else {
-                sb.append('%').append(String.format(Locale.US, "%02X", c));
-            }
-        }
-        return sb.toString();
     }
 }

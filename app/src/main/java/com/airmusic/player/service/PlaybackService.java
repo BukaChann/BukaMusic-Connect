@@ -1322,6 +1322,9 @@ public class PlaybackService extends Service {
         unregisterUsbReceiver();
         releaseWakeLock();
         metadataExecutor.shutdown();
+        com.airmusic.player.transfer.MusicTransferServer transferServer =
+                com.airmusic.player.transfer.MusicTransferServer.sharedOrNull();
+        if (transferServer != null) transferServer.stop();
         instance = null;
         super.onDestroy();
         DiagnosticLog.i(TAG, "onDestroy finished in "
@@ -1449,7 +1452,7 @@ public class PlaybackService extends Service {
             byte[] icon = null;
             try {
                 android.graphics.drawable.Drawable drawable =
-                        androidx.core.content.ContextCompat.getDrawable(this, R.mipmap.ic_launcher);
+                        androidx.core.content.ContextCompat.getDrawable(this, R.drawable.brand_mark);
                 if (drawable != null) {
                     Bitmap bitmap = Bitmap.createBitmap(
                             Math.max(1, drawable.getIntrinsicWidth()),
